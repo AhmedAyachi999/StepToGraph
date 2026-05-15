@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+
+aag.json
+aag.svg
+feature_candidates/
+colored_features.step
+colored_features.gltf
+colored_features.html
+colored_features.bin
+test_colored.step
+test_colored.gltf
+test_colored.bin
