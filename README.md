@@ -7,6 +7,12 @@ The main idea comes from the paper:
 `Manufacturing feature recognition method based on graph and minimum non-intersection feature volume suppression`  
 DOI: `10.1007/s00170-023-11031-x`
 
+## Preview
+
+Original STEP solid colored by detected feature groups:
+
+![Colored STEP feature groups](README_viewer.svg)
+
 ## Idea
 
 A B-rep solid is turned into a graph:
