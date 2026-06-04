@@ -4,419 +4,337 @@ import json
 import math
 import re
 from collections import defaultdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from xml.sax.saxutils import escape
+from typing import Any, Literal
 
 import cadquery as cq
+from OCP.BRep import BRep_Tool
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_VERTEX
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS
 
 
-PAPER_TITLE = "Manufacturing feature recognition method based on graph and minimum non-intersection feature volume suppression"
-PAPER_URL = "https://doi.org/10.1007/s00170-023-11031-x"
-PALETTE = ["#93c5fd", "#fca5a5", "#86efac", "#fdba74", "#c4b5fd", "#f9a8d4", "#67e8f9", "#fde68a", "#d8b4fe", "#a7f3d0"]
+Convexity = Literal["convex", "concave", "neutral"]
 
 
-def build_attributed_adjacency_graph(step_path: str | Path) -> dict:
-    # 1. Read the original solid.
-    # 2. Build the face adjacency graph from shared edges.
-    # 3. Mark convex closed-loop edges as feature boundaries.
-    # 4. Remove those boundaries and keep the remaining connected parts as feature candidates.
+class AnalysisCancelled(Exception):
+    """Raised when a caller requests cancellation during edge classification."""
+
+
+class CircleFaceIntersectionError(RuntimeError):
+    """Raised when the auxiliary circle does not intersect an adjacent face."""
+
+
+@dataclass(frozen=True)
+class EdgeProbe:
+    center: list[float]
+    normal_a: list[float]
+    normal_b: list[float]
+    p1: list[float] | None
+    p2: list[float] | None
+    midpoint: list[float] | None
+    midpoint_inside: bool | None
+    chord_length: float | None
+    radius: float
+
+
+@dataclass(frozen=True)
+class ClassifiedEdge:
+    id: int
+    source_face: int
+    target_face: int
+    curve_type: str
+    convexity: Convexity
+    samples: list[list[float]]
+    probe: EdgeProbe
+
+
+@dataclass(frozen=True)
+class EdgeAnalysis:
+    source_file: str
+    edge_count: int
+    convex_count: int
+    concave_count: int
+    neutral_count: int
+    edges: list[ClassifiedEdge]
+
+    @property
+    def visible_edges(self) -> list[ClassifiedEdge]:
+        return [edge for edge in self.edges if edge.convexity in {"convex", "concave"}]
+
+
+def classify_step_edges(
+    step_path: str | Path,
+    *,
+    probe_samples: int | None = None,
+    edge_sample_count: int = 24,
+    cancel_event: Any | None = None,
+) -> EdgeAnalysis:
+    """Classify STEP shared edges with an auxiliary-circle probe."""
+    _check_cancel(cancel_event)
     step_path = Path(step_path)
     solid = cq.importers.importStep(str(step_path)).val()
+    _check_cancel(cancel_event)
     faces = solid.Faces()
-    face_ids = _map_faces_to_step_ids(step_path, faces)
-    shared_edges = _shared_edges(solid, faces, face_ids)
-    boundary_edge_ids = _boundary_edge_ids(shared_edges)
-    groups = _connected_groups(face_ids.values(), shared_edges, boundary_edge_ids)
-    face_to_group = {face_id: group["id"] for group in groups for face_id in group["faces"]}
+    face_ids = _face_ids(step_path, faces)
+    classified_edges = _shared_edges(solid, faces, face_ids, edge_sample_count, cancel_event)
 
-    return {
-        "source_file": str(step_path.resolve()),
-        "method": {
-            "name": "Attributed Adjacency Graph (AAG)",
-            "reference_title": PAPER_TITLE,
-            "reference_url": PAPER_URL,
-            "decomposition_note": "Convex shared edges are treated as feature boundaries only if they form a closed loop.",
-        },
-        "nodes": sorted(
-            [_node(face, face_ids[face.hashCode()], face_to_group.get(face_ids[face.hashCode()])) for face in faces],
-            key=lambda n: n["id"],
-        ),
-        "edges": sorted(
-            [_edge(info, boundary_edge_ids) for info in shared_edges],
-            key=lambda e: (e["source"], e["target"]),
-        ),
-        "feature_candidates": groups,
-        "stats": {
-            "face_count": len(faces),
-            "adjacency_count": len(shared_edges),
-            "boundary_edge_count": len(boundary_edge_ids),
-            "feature_candidate_count": len(groups),
-        },
-    }
+    return EdgeAnalysis(
+        source_file=str(step_path.resolve()),
+        edge_count=len(classified_edges),
+        convex_count=sum(edge.convexity == "convex" for edge in classified_edges),
+        concave_count=sum(edge.convexity == "concave" for edge in classified_edges),
+        neutral_count=sum(edge.convexity == "neutral" for edge in classified_edges),
+        edges=classified_edges,
+    )
 
 
-def graph_to_json(graph: dict) -> str:
-    return json.dumps(graph, indent=2)
+def analysis_to_json(analysis: EdgeAnalysis) -> str:
+    return json.dumps(asdict(analysis), indent=2)
 
 
-def save_graph_plot(graph: dict, output_path: str | Path) -> Path:
-    output_path = Path(output_path)
-    output_path.write_text(_graph_svg(graph), encoding="utf-8")
-    return output_path
-
-
-def export_feature_candidates(graph: dict, output_dir: str | Path) -> Path:
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for old_file in output_dir.glob("*"):
-        if old_file.is_file():
-            old_file.unlink()
-
-    nodes_by_id = {node["id"]: node for node in graph["nodes"]}
-    for group in graph["feature_candidates"]:
-        face_ids = set(group["faces"])
-        sub_nodes = [nodes_by_id[face_id] for face_id in group["faces"]]
-        sub_edges = [edge for edge in graph["edges"] if edge["source"] in face_ids and edge["target"] in face_ids]
-        name = _feature_name(sub_nodes)
-        subgraph = {
-            "source_file": graph["source_file"],
-            "method": graph["method"],
-            "feature_candidate": {"id": group["id"], "name": name},
-            "nodes": sub_nodes,
-            "edges": sub_edges,
-            "stats": {"face_count": len(sub_nodes), "adjacency_count": len(sub_edges)},
-        }
-        stem = f"{group['id']:02d}_{name}"
-        (output_dir / f"{stem}.json").write_text(graph_to_json(subgraph), encoding="utf-8")
-        save_graph_plot(subgraph, output_dir / f"{stem}.svg")
-    return output_dir
-
-
-def export_colored_model(step_path: str | Path, graph: dict, step_out: str | Path, gltf_out: str | Path, html_out: str | Path) -> dict:
-    step_path = Path(step_path)
-    solid = cq.importers.importStep(str(step_path)).val()
-    faces = solid.Faces()
-    step_face_ids = _step_face_ids(step_path)
-    nodes_by_id = {node["id"]: node for node in graph["nodes"]}
-
-    assembly = cq.Assembly(solid, name="part")
-    for i, face in enumerate(faces):
-        if i >= len(step_face_ids):
-            continue
-        face_id = step_face_ids[i]
-        group_id = nodes_by_id[face_id]["attributes"]["feature_group"]
-        assembly.addSubshape(face, name=f"face_{face_id}", color=_cad_color(group_id))
-
-    step_out = Path(step_out)
-    gltf_out = Path(gltf_out)
-    html_out = Path(html_out)
-    assembly.save(str(step_out))
-    assembly.save(str(gltf_out))
-    html_out.write_text(_viewer_html(gltf_out.name), encoding="utf-8")
-    return {"step": step_out, "gltf": gltf_out, "html": html_out}
-
-
-def _map_faces_to_step_ids(step_path: Path, faces: list[cq.Face]) -> dict[int, int]:
+def _face_ids(step_path: Path, faces: list[cq.Face]) -> dict[int, int]:
     step_ids = _step_face_ids(step_path)
-    return {face.hashCode(): step_ids[i] if i < len(step_ids) else i + 1 for i, face in enumerate(faces)}
+    return {
+        face.hashCode(): step_ids[index] if index < len(step_ids) else index + 1
+        for index, face in enumerate(faces)
+    }
 
 
 def _step_face_ids(step_path: Path) -> list[int]:
     text = step_path.read_text(encoding="utf-8", errors="replace")
-    return [int(x) for x in re.findall(r"#(\d+)\s*=\s*ADVANCED_FACE\s*\(", text)]
+    return [int(value) for value in re.findall(r"#(\d+)\s*=\s*ADVANCED_FACE\s*\(", text)]
 
 
-def _shared_edges(solid: cq.Solid, faces: list[cq.Face], face_ids: dict[int, int]) -> list[dict]:
-    # For each shared edge, classify the local material side:
-    # inside probe -> convex, outside probe -> concave, near-zero probe -> smooth.
+def _shared_edges(
+    solid: cq.Solid,
+    faces: list[cq.Face],
+    face_ids: dict[int, int],
+    edge_sample_count: int,
+    cancel_event: Any | None,
+) -> list[ClassifiedEdge]:
     edge_faces: dict[int, list[tuple[cq.Face, cq.Edge]]] = defaultdict(list)
     for face in faces:
+        _check_cancel(cancel_event)
         for edge in face.Edges():
-            if not any(edge.isSame(existing_edge) and face.isSame(existing_face) for existing_face, existing_edge in edge_faces[edge.hashCode()]):
-                edge_faces[edge.hashCode()].append((face, edge))
+            references = edge_faces[edge.hashCode()]
+            already_seen = any(
+                edge.isSame(existing_edge) and face.isSame(existing_face)
+                for existing_face, existing_edge in references
+            )
+            if not already_seen:
+                references.append((face, edge))
 
     box = solid.BoundingBox()
-    probe_step = max(max(box.xlen, box.ylen, box.zlen) * 1e-3, 1e-3)
-    result = []
+    probe_radius = max(max(box.xlen, box.ylen, box.zlen) * 1e-3, 1e-3)
+    classified_edges: list[ClassifiedEdge] = []
 
-    for edge_id, refs in edge_faces.items():
-        refs = _unique_face_refs(refs)
-        if len(refs) != 2:
+    for edge_id, references in edge_faces.items():
+        _check_cancel(cancel_event)
+        references = _unique_face_references(references)
+        if len(references) != 2:
             continue
-        (face_a, edge), (face_b, _) = refs
-        point = edge.positionAt(0.5)
-        material_a = face_a.normalAt(point).cross(_tangent_in_face(face_a, edge))
-        material_b = face_b.normalAt(point).cross(_tangent_in_face(face_b, edge))
-        probe = material_a + material_b
 
-        if _length(probe) < 1e-6:
-            convexity = "smooth"
-        else:
-            test_point = point + _unit(probe).multiply(probe_step)
-            convexity = "convex" if solid.isInside(test_point.toTuple(), 1e-6) else "concave"
-
-        result.append(
-            {
-                "edge_id": edge_id,
-                "edge": edge,
-                "source": face_ids[face_a.hashCode()],
-                "target": face_ids[face_b.hashCode()],
-                "geometry_type": edge.geomType(),
-                "convexity": convexity,
-            }
+        (face_a, edge), (face_b, _) = references
+        probe, convexity = _convexity_probe(
+            solid,
+            face_a,
+            face_b,
+            edge,
+            probe_radius,
+            cancel_event,
         )
-    return result
+        classified_edges.append(
+            ClassifiedEdge(
+                id=edge_id,
+                source_face=face_ids[face_a.hashCode()],
+                target_face=face_ids[face_b.hashCode()],
+                curve_type=edge.geomType(),
+                convexity=convexity,
+                samples=_edge_samples(edge, edge_sample_count),
+                probe=probe,
+            )
+        )
+
+    return classified_edges
 
 
-def _unique_face_refs(refs: list[tuple[cq.Face, cq.Edge]]) -> list[tuple[cq.Face, cq.Edge]]:
-    unique = []
-    for face, edge in refs:
-        if not any(face.isSame(other_face) for other_face, _ in unique):
+def _unique_face_references(references: list[tuple[cq.Face, cq.Edge]]) -> list[tuple[cq.Face, cq.Edge]]:
+    unique: list[tuple[cq.Face, cq.Edge]] = []
+    for face, edge in references:
+        if not any(face.isSame(existing_face) for existing_face, _ in unique):
             unique.append((face, edge))
     return unique
 
 
-def _tangent_in_face(face: cq.Face, target_edge: cq.Edge) -> cq.Vector:
-    for wire in face.Wires():
-        for edge in wire.Edges():
-            if edge.isSame(target_edge):
-                tangent = edge.tangentAt(0.5)
-                return -tangent if edge.wrapped.Orientation().name == "TopAbs_REVERSED" else tangent
-    return target_edge.tangentAt(0.5)
+def _convexity_probe(
+    solid: cq.Solid,
+    face_a: cq.Face,
+    face_b: cq.Face,
+    edge: cq.Edge,
+    radius: float,
+    cancel_event: Any | None,
+) -> tuple[EdgeProbe, Convexity]:
+    _check_cancel(cancel_event)
+    center = edge.positionAt(0.5)
+    normal_a = _probe_normal(face_a, center)
+    normal_b = _probe_normal(face_b, center)
+    circle = _auxiliary_circle(center, normal_a, normal_b, radius)
+    if circle is None:
+        return _probe_result(center, normal_a, normal_b, None, None, None, None, None, radius), "neutral"
+
+    p1 = _auxiliary_circle_face_hit(face_a, circle, cancel_event)
+    p2 = _auxiliary_circle_face_hit(face_b, circle, cancel_event)
+
+    midpoint = (p1 + p2).multiply(0.5)
+    chord_length = _length(p1 - p2)
+    if chord_length < radius * 1e-4:
+        return _probe_result(center, normal_a, normal_b, p1, p2, midpoint, None, chord_length, radius), "neutral"
+
+    midpoint_inside = solid.isInside(midpoint, max(radius * 1e-3, 1e-7))
+    convexity = "convex" if midpoint_inside else "concave"
+    return (
+        _probe_result(
+            center,
+            normal_a,
+            normal_b,
+            p1,
+            p2,
+            midpoint,
+            midpoint_inside,
+            chord_length,
+            radius,
+        ),
+        convexity,
+    )
 
 
-def _boundary_edge_ids(shared_edges: list[dict]) -> set[int]:
-    # Paper idea: do not split on every convex edge.
-    # Only keep convex edges that survive the closed-loop filter.
-    convex_edges = [info for info in shared_edges if info["convexity"] == "convex"]
-    closed_loops = {info["edge_id"] for info in convex_edges if info["edge"].Closed() or len(info["edge"].Vertices()) <= 1}
-
-    vertex_links: dict[int, set[tuple[int, int]]] = defaultdict(set)
-    for info in convex_edges:
-        if info["edge_id"] in closed_loops:
-            continue
-        vertices = info["edge"].Vertices()
-        if len(vertices) != 2:
-            continue
-        a = vertices[0].hashCode()
-        b = vertices[1].hashCode()
-        vertex_links[a].add((b, info["edge_id"]))
-        vertex_links[b].add((a, info["edge_id"]))
-
-    active = {info["edge_id"] for info in convex_edges if info["edge_id"] not in closed_loops}
-    changed = True
-    while changed:
-        changed = False
-        dangling = [v for v in list(vertex_links) if sum(1 for _, e in vertex_links[v] if e in active) < 2]
-        if dangling:
-            changed = True
-            for vertex in dangling:
-                for _, edge_id in vertex_links[vertex]:
-                    active.discard(edge_id)
-                vertex_links.pop(vertex, None)
-    return closed_loops | active
+def _probe_normal(face: cq.Face, point: cq.Vector) -> cq.Vector:
+    return _unit(face.normalAt(point))
 
 
-def _connected_groups(face_ids, shared_edges: list[dict], boundary_edge_ids: set[int]) -> list[dict]:
-    adjacency = {face_id: set() for face_id in face_ids}
-    for info in shared_edges:
-        if info["edge_id"] in boundary_edge_ids:
-            continue
-        adjacency[info["source"]].add(info["target"])
-        adjacency[info["target"]].add(info["source"])
-
-    groups = []
-    seen = set()
-    for start in sorted(adjacency):
-        if start in seen:
-            continue
-        stack = [start]
-        seen.add(start)
-        faces = []
-        while stack:
-            current = stack.pop()
-            faces.append(current)
-            for neighbor in sorted(adjacency[current]):
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    stack.append(neighbor)
-        groups.append({"id": len(groups) + 1, "faces": sorted(faces)})
-    return groups
+def _auxiliary_circle(
+    center: cq.Vector,
+    normal_a: cq.Vector,
+    normal_b: cq.Vector,
+    radius: float,
+) -> tuple[cq.Vector, cq.Vector, cq.Vector, float] | None:
+    u = _unit(normal_a)
+    v = normal_b - u.multiply(_dot(normal_b, u))
+    if _length(v) < 1e-9:
+        return None
+    return center, u, _unit(v), radius
 
 
-def _node(face: cq.Face, face_id: int, group_id: int | None) -> dict:
-    return {
-        "id": face_id,
-        "surface_type": face.geomType(),
-        "attributes": {
-            "bound_count": len(face.Wires()),
-            "edge_curve_count": len(face.Edges()),
-            "feature_group": group_id,
-        },
-    }
+def _auxiliary_circle_face_hit(
+    face: cq.Face,
+    circle: tuple[cq.Vector, cq.Vector, cq.Vector, float],
+    cancel_event: Any | None,
+) -> cq.Vector:
+    _check_cancel(cancel_event)
+    center, u, v, radius = circle
+    plane_normal = _unit(u.cross(v))
+    if _length(plane_normal) < 1e-9:
+        raise CircleFaceIntersectionError("Auxiliary circle plane is degenerate.")
+
+    circle_edge = cq.Edge.makeCircle(radius, center, plane_normal)
+    section = BRepAlgoAPI_Section(face.wrapped, circle_edge.wrapped, False)
+    section.Approximation(True)
+    section.ComputePCurveOn1(True)
+    section.Build()
+    if not section.IsDone():
+        raise CircleFaceIntersectionError("OpenCascade section operation failed.")
+
+    points = _section_points(section.Shape())
+    if not points:
+        raise CircleFaceIntersectionError("Auxiliary circle does not intersect adjacent face.")
+    return _nearest_to_circle(points, center, radius)
 
 
-def _edge(info: dict, boundary_edge_ids: set[int]) -> dict:
-    return {
-        "source": min(info["source"], info["target"]),
-        "target": max(info["source"], info["target"]),
-        "shared_edge_curves": [info["edge_id"]],
-        "attributes": {
-            "shared_edge_curve_count": 1,
-            "shared_edge_geometry": [{"edge_curve_id": info["edge_id"], "geometry_type": info["geometry_type"]}],
-            "convexity": info["convexity"],
-            "is_feature_boundary": info["edge_id"] in boundary_edge_ids,
-        },
-    }
+def _section_points(shape: Any) -> list[cq.Vector]:
+    points: list[cq.Vector] = []
+
+    vertex_explorer = TopExp_Explorer(shape, TopAbs_VERTEX)
+    while vertex_explorer.More():
+        vertex = TopoDS.Vertex_s(vertex_explorer.Current())
+        point = BRep_Tool.Pnt_s(vertex)
+        points.append(cq.Vector(point.X(), point.Y(), point.Z()))
+        vertex_explorer.Next()
+
+    edge_explorer = TopExp_Explorer(shape, TopAbs_EDGE)
+    while edge_explorer.More():
+        edge = cq.Edge(TopoDS.Edge_s(edge_explorer.Current()))
+        points.append(edge.positionAt(0.5))
+        edge_explorer.Next()
+
+    return _unique_points(points)
 
 
-def _feature_name(nodes: list[dict]) -> str:
-    surface_types = [node["surface_type"] for node in nodes]
-    face_count = len(nodes)
-    cylinders = surface_types.count("CYLINDER")
-    planes = surface_types.count("PLANE")
-    if face_count == 1 and cylinders == 1:
-        return "round_hole_candidate"
-    if cylinders >= 1 and face_count <= 3:
-        return "cylindrical_feature_candidate"
-    if planes == face_count and face_count <= 2:
-        return "step_or_slot_candidate"
-    if planes == face_count:
-        return "planar_feature_candidate"
-    return "feature_candidate"
+def _nearest_to_circle(points: list[cq.Vector], center: cq.Vector, radius: float) -> cq.Vector:
+    return min(points, key=lambda point: abs(_length(point - center) - radius))
 
 
-def _graph_svg(graph: dict) -> str:
-    width, height = 1400, 1000
-    positions = _force_layout(graph["nodes"], graph["edges"], width, height)
-
-    edge_svg = []
-    for edge in graph["edges"]:
-        x1, y1 = positions[edge["source"]]
-        x2, y2 = positions[edge["target"]]
-        color = "#dc2626" if edge["attributes"]["is_feature_boundary"] else "#64748b"
-        opacity = "0.9" if edge["attributes"]["is_feature_boundary"] else "0.45"
-        stroke = 3.0 if edge["attributes"]["is_feature_boundary"] else 1.6
-        edge_svg.append(f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="{color}" stroke-opacity="{opacity}" stroke-width="{stroke:.2f}" />')
-
-    node_svg, label_svg = [], []
-    for node in graph["nodes"]:
-        x, y = positions[node["id"]]
-        r = 16 + min(node["attributes"]["edge_curve_count"], 8)
-        fill = _group_color(node["attributes"]["feature_group"])
-        title = escape(f'Face #{node["id"]} | surface={node["surface_type"]} | group={node["attributes"]["feature_group"]}')
-        node_svg.append(f'<g><title>{title}</title><circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" fill="{fill}" stroke="#0f172a" stroke-width="1.5" /></g>')
-        label_svg.append(f'<text x="{x:.2f}" y="{y + 4:.2f}" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="white" stroke="white" stroke-width="4" paint-order="stroke">#{node["id"]}</text>')
-        label_svg.append(f'<text x="{x:.2f}" y="{y + 4:.2f}" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#0f172a">#{node["id"]}</text>')
-
-    title = escape(graph["method"]["name"])
-    subtitle = escape(Path(graph["source_file"]).name)
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-  <rect width="100%" height="100%" fill="#f8fafc" />
-  <text x="60" y="44" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">{title}</text>
-  <text x="60" y="72" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#475569">{subtitle}</text>
-  <text x="60" y="96" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#475569">Colored nodes = candidate feature groups, red edges = removed boundaries</text>
-  <g>{''.join(edge_svg)}</g>
-  <g>{''.join(node_svg)}</g>
-  <g>{''.join(label_svg)}</g>
-</svg>
-"""
+def _unique_points(points: list[cq.Vector]) -> list[cq.Vector]:
+    unique: list[cq.Vector] = []
+    for point in points:
+        if not any(_length(point - existing) < 1e-7 for existing in unique):
+            unique.append(point)
+    return unique
 
 
-def _force_layout(nodes: list[dict], edges: list[dict], width: int, height: int, iterations: int = 250) -> dict[int, tuple[float, float]]:
-    if not nodes:
-        return {}
-    node_ids = [node["id"] for node in sorted(nodes, key=lambda n: n["id"])]
-    positions = {
-        node_id: (
-            width / 2 + min(width, height) * 0.25 * math.cos(2 * math.pi * i / len(node_ids)),
-            height / 2 + min(width, height) * 0.25 * math.sin(2 * math.pi * i / len(node_ids)),
-        )
-        for i, node_id in enumerate(node_ids)
-    }
-    links = [(e["source"], e["target"]) for e in edges if not e["attributes"]["is_feature_boundary"]]
-    k = math.sqrt(width * height / max(len(node_ids), 1))
-    temp = min(width, height) * 0.12
-
-    for _ in range(iterations):
-        disp = {node_id: [0.0, 0.0] for node_id in node_ids}
-        for i, a in enumerate(node_ids):
-            for b in node_ids[i + 1:]:
-                dx = positions[a][0] - positions[b][0]
-                dy = positions[a][1] - positions[b][1]
-                dist = max(math.hypot(dx, dy), 0.01)
-                force = (k * k) / dist
-                disp[a][0] += dx / dist * force
-                disp[a][1] += dy / dist * force
-                disp[b][0] -= dx / dist * force
-                disp[b][1] -= dy / dist * force
-        for a, b in links:
-            dx = positions[a][0] - positions[b][0]
-            dy = positions[a][1] - positions[b][1]
-            dist = max(math.hypot(dx, dy), 0.01)
-            force = (dist * dist) / k
-            disp[a][0] -= dx / dist * force
-            disp[a][1] -= dy / dist * force
-            disp[b][0] += dx / dist * force
-            disp[b][1] += dy / dist * force
-        for node_id in node_ids:
-            dx, dy = disp[node_id]
-            dist = max(math.hypot(dx, dy), 0.01)
-            step = min(dist, temp)
-            x = positions[node_id][0] + dx / dist * step
-            y = positions[node_id][1] + dy / dist * step
-            positions[node_id] = (min(width - 80, max(80, x)), min(height - 80, max(120, y)))
-        temp *= 0.96
-
-    xs = [positions[i][0] for i in node_ids]
-    ys = [positions[i][1] for i in node_ids]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    span_x = max(max_x - min_x, 1.0)
-    span_y = max(max_y - min_y, 1.0)
-    return {
-        node_id: (
-            120 + (positions[node_id][0] - min_x) * (width - 240) / span_x,
-            140 + (positions[node_id][1] - min_y) * (height - 260) / span_y,
-        )
-        for node_id in node_ids
-    }
+def _check_cancel(cancel_event: Any | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AnalysisCancelled("Analysis cancelled.")
 
 
-def _group_color(group_id: int | None) -> str:
-    return "#d1d5db" if not group_id else PALETTE[(group_id - 1) % len(PALETTE)]
+def _probe_result(
+    center: cq.Vector,
+    normal_a: cq.Vector,
+    normal_b: cq.Vector,
+    p1: cq.Vector | None,
+    p2: cq.Vector | None,
+    midpoint: cq.Vector | None,
+    midpoint_inside: bool | None,
+    chord_length: float | None,
+    radius: float,
+) -> EdgeProbe:
+    return EdgeProbe(
+        center=_tuple(center),
+        normal_a=_tuple(normal_a),
+        normal_b=_tuple(normal_b),
+        p1=_tuple(p1) if p1 else None,
+        p2=_tuple(p2) if p2 else None,
+        midpoint=_tuple(midpoint) if midpoint else None,
+        midpoint_inside=midpoint_inside,
+        chord_length=chord_length,
+        radius=radius,
+    )
 
 
-def _cad_color(group_id: int | None) -> cq.Color:
-    hex_color = _group_color(group_id).lstrip("#")
-    return cq.Color(int(hex_color[0:2], 16) / 255.0, int(hex_color[2:4], 16) / 255.0, int(hex_color[4:6], 16) / 255.0)
-
-
-def _viewer_html(model_name: str) -> str:
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Colored STEP Features</title>
-  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
-  <style>
-    html, body {{ margin: 0; height: 100%; background: #e2e8f0; font-family: Segoe UI, Arial, sans-serif; }}
-    model-viewer {{ width: 100%; height: 100%; --poster-color: #e2e8f0; }}
-    .caption {{ position: fixed; top: 16px; left: 16px; padding: 10px 14px; background: rgba(255,255,255,0.9); border-radius: 10px; color: #0f172a; font-size: 14px; }}
-  </style>
-</head>
-<body>
-  <div class="caption">Original solid colored by detected feature group</div>
-  <model-viewer src="{model_name}" camera-controls auto-rotate exposure="1.0" shadow-intensity="0.8"></model-viewer>
-</body>
-</html>
-"""
+def _edge_samples(edge: cq.Edge, count: int) -> list[list[float]]:
+    count = max(2, count)
+    if edge.Closed():
+        parameters = [index / count for index in range(count + 1)]
+    else:
+        parameters = [index / (count - 1) for index in range(count)]
+    return [_tuple(edge.positionAt(parameter)) for parameter in parameters]
 
 
 def _length(vector: cq.Vector) -> float:
     x, y, z = vector.toTuple()
     return math.sqrt(x * x + y * y + z * z)
+
+
+def _dot(a: cq.Vector, b: cq.Vector) -> float:
+    ax, ay, az = a.toTuple()
+    bx, by, bz = b.toTuple()
+    return ax * bx + ay * by + az * bz
+
+
+def _tuple(vector: cq.Vector) -> list[float]:
+    return [float(value) for value in vector.toTuple()]
 
 
 def _unit(vector: cq.Vector) -> cq.Vector:

@@ -1,100 +1,66 @@
-# StepToGraph
+# STEP Convex/Concave Edge Viewer
 
-This project takes a STEP file, converts the solid into an attributed adjacency graph, and uses that graph to approximate manufacturing feature decomposition.
+This project does one thing: classify shared STEP edges as convex or concave and visualize those edges on the original solid.
 
-The main idea comes from the paper:
+The implementation keeps the current auxiliary-circle edge classifier and removes hole detection, feature grouping, dataset reports, galleries, and generated examples.
 
-`Manufacturing feature recognition method based on graph and minimum non-intersection feature volume suppression`  
-DOI: `10.1007/s00170-023-11031-x`
-
-## Preview
-
-Original STEP solid colored by detected feature groups:
-
-![Colored STEP feature groups](README_viewer.svg)
-
-## Idea
-
-A B-rep solid is turned into a graph:
-
-- each face becomes a node
-- each shared edge between two faces becomes a graph edge
-- each graph edge is labeled as `convex`, `concave`, or `smooth`
-
-The paper's key decomposition idea is:
-
-- do not split on every convex edge
-- keep only convex edges that form closed loops
-- treat those loops as feature boundaries
-- remove those boundaries from the graph
-- the remaining connected components become candidate feature substructures
-
-This project implements that pipeline with OpenCascade through `cadquery`.
-
-## What The Project Produces
-
-Given a STEP file, the project writes:
-
-- `aag.json`: the attributed adjacency graph
-- `aag.svg`: a 2D plot of the graph
-- `feature_candidates/`: one JSON and one SVG per detected candidate substructure
-- `colored_features.step`: the original solid with faces colored by detected group
-- `colored_features.gltf`: a colored 3D export of the same solid
-- `colored_features.html`: a simple browser viewer for the colored 3D model
-
-## How The Method Works
-
-The main function is in `step_graph.py`:
-
-1. Load the STEP solid.
-2. Enumerate all faces.
-3. Find every shared edge between two faces.
-4. For each shared edge, classify it as convex or concave by probing the local material side of the solid.
-5. Keep only convex edges that survive a closed-loop filter.
-6. Remove those boundary edges from the graph.
-7. Take connected components of the remaining graph as candidate features.
-
-This is a decomposition stage, not full feature recognition.
-
-That means:
-
-- the graph split is geometry-based
-- the exported substructures are candidate features
-- the names are still heuristic labels, not full template-matched manufacturing feature names
-
-## How To Run
-
-Use the virtual environment in the project:
+## Run
 
 ```powershell
-venv\Scripts\python.exe main.py s14-08.stp
+.\.venv311\Scripts\python.exe main.py
 ```
 
-## How To Read The Code
+By default, the CLI uses the first `step_datasets/Par*.STEP` file.
 
-Start here:
+Analyze a specific file from the kept dataset:
 
-- `main.py`
-- `step_graph.py`
+```powershell
+$step = Get-ChildItem step_datasets -Filter "Par*.STEP" | Select-Object -First 1
+.\.venv311\Scripts\python.exe main.py $step.FullName
+```
 
-Inside `step_graph.py`, read these functions in order:
+Write JSON as well as the viewer:
 
-1. `build_attributed_adjacency_graph`
-2. `_shared_edges`
-3. `_boundary_edge_ids`
-4. `_connected_groups`
-5. `export_colored_model`
+```powershell
+.\.venv311\Scripts\python.exe main.py --json-output edges.json
+```
 
-That is the full method from input solid to decomposed graph and colored output.
+## Desktop UI
 
-## Limits
+Run the desktop interface:
 
-This project does not yet implement the full final recognition stage from the paper:
+```powershell
+.\.venv311\Scripts\python.exe desktop_ui.py
+```
 
-- no subgraph-template matching
-- no minimum non-intersection volume suppression loop
-- no exact manufacturing feature naming
+The app lists the `Par*.STEP` datasets without analyzing them at startup. Select
+a dataset and click `Open Selected`, or click `Choose File` to load another
+`.STEP` or `.STP` file. The analysis runs in the background with a progress bar
+and estimated remaining time, then displays the solid with convex edges in green
+and concave edges in blue. Use `Stop Loading` to cancel a long run; cancellation
+takes effect when the current geometry operation yields back to the classifier.
 
-So the current output is best understood as:
+The convex/concave rule follows the paper-style auxiliary-circle test:
 
-`geometry-based feature candidate decomposition from a STEP B-rep`
+1. Take the midpoint of the shared edge.
+2. Build a small auxiliary circle from the two adjacent face normals.
+3. Intersect that circle with each adjacent face to get one point per face.
+4. Take the midpoint between those two circle points.
+5. If that midpoint is inside the solid, classify the edge as convex; otherwise
+   classify it as concave.
+
+After a file is loaded, use `Solid View` for the 3D edge overlay or `Graph View`
+for the face-adjacency graph. Graph nodes are STEP faces; graph edges are shared
+face edges colored by classification.
+
+Desktop UI run metadata and JSON outputs are written to `visualization/output/desktop/`.
+
+## Files
+
+- `main.py`: command-line entry point.
+- `desktop_ui.py`: desktop interface for loading one STEP file at a time.
+- `step_graph.py`: STEP loading and convex/concave edge classification.
+- `visualization/viewer.py`: 3D visualization for convex and concave edges.
+- `step_datasets/`: `Par*.STEP`, `Cylinder1x1.step`, and `L-bracket.STEP`.
+
+Generated viewer files are written to `visualization/output/`.
