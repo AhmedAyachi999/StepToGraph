@@ -4,27 +4,18 @@ import argparse
 from pathlib import Path
 
 from step_graph import analysis_to_json, classify_step_edges
-from visualization import write_edge_visualization
 
 
-DEFAULT_OUTPUT_DIR = Path("visualization/output")
 DATASET_DIR = Path("step_datasets")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize convex and concave STEP edges.")
+    parser = argparse.ArgumentParser(description="Classify STEP edges.")
     parser.add_argument(
         "step_file",
         nargs="?",
         type=Path,
         help="STEP file to analyze. Defaults to the first step_datasets/Par*.STEP file.",
-    )
-    parser.add_argument(
-        "-o",
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Directory for the generated 3D edge viewer.",
     )
     parser.add_argument(
         "--json-output",
@@ -39,14 +30,11 @@ def main() -> int:
     step_file = args.step_file or _default_step_file()
 
     analysis = classify_step_edges(step_file)
-    views = write_edge_visualization(step_file, analysis, args.output_dir)
-
     print(f"STEP file: {Path(analysis.source_file).name}")
     print(f"Shared edges: {analysis.edge_count}")
     print(f"Convex edges: {analysis.convex_count}")
     print(f"Concave edges: {analysis.concave_count}")
-    print(f"Neutral edges ignored by viewer: {analysis.neutral_count}")
-    print(f"Wrote edge viewer: {views['html'].resolve()}")
+    print(f"Neutral edges: {analysis.neutral_count}")
 
     if args.json_output:
         args.json_output.write_text(analysis_to_json(analysis), encoding="utf-8")

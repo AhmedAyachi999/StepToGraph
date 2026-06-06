@@ -1,5 +1,9 @@
 venv/
 .venv*/
+occwl-env/
+Library/
+info/
+micromamba.tar.bz2
 .idea/
 __pycache__/
 *.pyc
