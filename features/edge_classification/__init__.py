@@ -1,4 +1,4 @@
-from features.edge_classification import (
+from .classifier import (
     AnalysisCancelled,
     ClassifiedEdge,
     EdgeAnalysis,
