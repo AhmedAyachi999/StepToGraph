@@ -1,5 +1,6 @@
 import sys
 import tkinter as tk
+import traceback
 from tkinter import filedialog
 from pathlib import Path
 from typing import Any
@@ -61,12 +62,12 @@ DIRECTION_OPTIONS = (
     ("From -Y", (0.0, 1.0, 0.0)),
 )
 SPRAY_DIRECTION_OPTIONS = (
-    ("+X", "Spray +X", (-1.0, 0.0, 0.0)),
-    ("-X", "Spray -X", (1.0, 0.0, 0.0)),
-    ("+Y", "Spray +Y", (0.0, -1.0, 0.0)),
-    ("-Y", "Spray -Y", (0.0, 1.0, 0.0)),
-    ("+Z", "Spray +Z", (0.0, 0.0, -1.0)),
-    ("-Z", "Spray -Z", (0.0, 0.0, 1.0)),
+    ("+X", "+X", (-1.0, 0.0, 0.0)),
+    ("-X", "-X", (1.0, 0.0, 0.0)),
+    ("+Y", "+Y", (0.0, -1.0, 0.0)),
+    ("-Y", "-Y", (0.0, 1.0, 0.0)),
+    ("+Z", "+Z", (0.0, 0.0, -1.0)),
+    ("-Z", "-Z", (0.0, 0.0, 1.0)),
 )
 EDGE_COLORS = {
     "convex": Quantity_Color(0.0, 0.65, 0.18, Quantity_TOC_RGB),
@@ -102,11 +103,15 @@ def view_step_file(filename: str | Path) -> None:
 
     toolbar = tk.Frame(root, padx=8, pady=6)
     toolbar.pack(side=tk.TOP, fill=tk.X)
+    directionbar = tk.Frame(root, padx=8, pady=4)
+    directionbar.pack(side=tk.TOP, fill=tk.X)
     statusbar = tk.Frame(root, padx=8, pady=4)
     statusbar.pack(side=tk.BOTTOM, fill=tk.X)
     status = tk.StringVar(value=_status_text(path, edge_groups, feature_summary, "solid only"))
     model_status = tk.StringVar(value=f"Model: {DEFAULT_HOTSPOT_MODEL_PATH}")
     water_force_var = tk.StringVar(value=f"{REFERENCE_WATER_FORCE:.3f}")
+    spray_direction_var = tk.StringVar(value="all")
+    spray_status_var = tk.StringVar(value="Spray Direction: All Axis")
     cleaning_view_active = {"value": False}
     cleaning_refresh_after_id = {"id": None}
 
@@ -114,6 +119,20 @@ def view_step_file(filename: str | Path) -> None:
     viewer.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
     viewer.wait_visibility()
     display = viewer._display
+
+    def report_ui_error(exc: BaseException, context: str = "UI error") -> None:
+        message = f"{context}: {type(exc).__name__}: {exc}"
+        try:
+            status.set(_status_text(path, edge_groups, feature_summary, message))
+            model_status.set(message)
+        except Exception:
+            pass
+
+    def report_callback_exception(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+        traceback.print_exception(exc_type, exc, tb)
+        report_ui_error(exc)
+
+    root.report_callback_exception = report_callback_exception
 
     def choose_step_file() -> None:
         selected = filedialog.askopenfilename(
@@ -164,35 +183,45 @@ def view_step_file(filename: str | Path) -> None:
             cleaning_refresh_after_id["id"] = None
 
         root.title(f"STEP Hotspot Viewer - {path.name}")
-        display.EraseAll()
+        _clear_display(display)
         display.DisplayShape(shape, color=BASE_COLOR, transparency=0.15, update=False)
+        draw_reference_axes()
         display.FitAll()
         status.set(_status_text(path, edge_groups, feature_summary, "solid only"))
         display.Repaint()
 
+    def draw_reference_axes() -> None:
+        try:
+            display.display_triedron()
+        except Exception as exc:
+            report_ui_error(exc, "Axis display error")
+
     def show_colored_edges() -> None:
-        display.EraseAll()
+        _clear_display(display)
         display.DisplayShape(shape, color=BASE_COLOR, transparency=0.55, update=False)
         for edge_type, color in EDGE_COLORS.items():
             for ais in display.DisplayShape(edge_groups[edge_type], color=color, update=False):
                 display.Context.SetWidth(ais, 4.0, False)
+        draw_reference_axes()
         status.set(_status_text(path, edge_groups, feature_summary, "colored edges"))
         display.Repaint()
 
     def show_inward_cylinders() -> None:
-        display.EraseAll()
+        _clear_display(display)
         display.DisplayShape(shape, color=BASE_COLOR, transparency=0.70, update=False)
         if cylinder_shapes:
             display.DisplayShape(cylinder_shapes, color=INWARD_CYLINDER_COLOR, transparency=0.05, update=False)
+        draw_reference_axes()
         status.set(_status_text(path, edge_groups, feature_summary, "inward cylinders"))
         display.Repaint()
 
     def show_face_form(form_type: str) -> None:
-        display.EraseAll()
+        _clear_display(display)
         display.DisplayShape(shape, color=BASE_COLOR, transparency=0.72, update=False)
         form_shapes = form_shape_groups.get(form_type, [])
         if form_shapes:
             display.DisplayShape(form_shapes, color=FACE_FORM_COLORS[form_type], transparency=0.02, update=False)
+        draw_reference_axes()
         label = FACE_FORM_LABELS[form_type]
         status.set(_status_text(path, edge_groups, feature_summary, f"{label} faces"))
         display.Repaint()
@@ -208,7 +237,32 @@ def view_step_file(filename: str | Path) -> None:
         return mesh
 
     def active_water_directions() -> tuple[tuple[float, float, float], ...]:
+        selected_key = spray_direction_var.get()
+        if selected_key == "all":
+            return tuple(direction for _, _, direction in SPRAY_DIRECTION_OPTIONS)
+        for key, _label, direction in SPRAY_DIRECTION_OPTIONS:
+            if key == selected_key:
+                return (direction,)
         return tuple(direction for _, _, direction in SPRAY_DIRECTION_OPTIONS)
+
+    def set_spray_direction(direction_key: str) -> None:
+        spray_direction_var.set(direction_key)
+        spray_status_var.set(f"Spray Direction: {_spray_direction_label(direction_key)}")
+        if cleaning_view_active["value"]:
+            schedule_cleaning_refresh()
+            return
+        _clear_display(display)
+        display.DisplayShape(shape, color=BASE_COLOR, transparency=0.15, update=False)
+        draw_reference_axes()
+        status.set(
+            _status_text(
+                path,
+                edge_groups,
+                feature_summary,
+                f"direction selected: {_spray_direction_label(direction_key)}",
+            )
+        )
+        display.Repaint()
 
     def selected_cleaning_parameters() -> CleaningSimulationParameters:
         water_force = _parse_water_force(water_force_var.get())
@@ -253,11 +307,12 @@ def view_step_file(filename: str | Path) -> None:
             status.set(_status_text(path, edge_groups, feature_summary, f"particle error: {exc}"))
             return
 
-        display.EraseAll()
+        _clear_display(display)
         display.DisplayShape(shape, color=BASE_COLOR, transparency=0.62, update=False)
         radius = _marker_radius([triangle.point for triangle in mesh.triangles], scale=0.004)
         for triangle in _limited_sequence(mesh.triangles, MAX_PARTICLE_MARKERS):
             display.DisplayShape(_sphere_at(triangle.point, radius), color=DUST_COLOR, update=False)
+        draw_reference_axes()
         shown = min(len(mesh.triangles), MAX_PARTICLE_MARKERS)
         status.set(
             _status_text(
@@ -309,6 +364,7 @@ def view_step_file(filename: str | Path) -> None:
                 update=False,
             )
 
+        draw_reference_axes()
         parameters = selected_cleaning_parameters()
         status.set(
             _status_text(
@@ -349,6 +405,7 @@ def view_step_file(filename: str | Path) -> None:
                 update=False,
             )
 
+        draw_reference_axes()
         parameters = reference_cleaning_parameters()
         status.set(
             _status_text(
@@ -419,6 +476,7 @@ def view_step_file(filename: str | Path) -> None:
                     update=False,
                 )
 
+        draw_reference_axes()
         model_status.set(
             f"Pink=model {len(selected_predictions)} faces; "
             f"rank colors=particles stayed at force {REFERENCE_WATER_FORCE:.3f} "
@@ -490,6 +548,7 @@ def view_step_file(filename: str | Path) -> None:
             )
             shown += 1
 
+        draw_reference_axes()
         summary = _prediction_summary(predictions)
         model_status.set(f"Model: {summary}")
         status.set(
@@ -537,10 +596,27 @@ def view_step_file(filename: str | Path) -> None:
         toolbar,
         text=f"LightGBM LambdaRank: {DEFAULT_HOTSPOT_MODEL_PATH}",
     ).pack(side=tk.LEFT, padx=(0, 12))
+    tk.Label(directionbar, text="Spray Direction").pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(directionbar, text="All Axis", command=lambda: set_spray_direction("all")).pack(
+        side=tk.LEFT,
+        padx=(0, 6),
+    )
+    for key, label, _direction in SPRAY_DIRECTION_OPTIONS:
+        tk.Button(directionbar, text=label, command=lambda key=key: set_spray_direction(key)).pack(
+            side=tk.LEFT,
+            padx=(0, 4),
+        )
+    tk.Label(directionbar, textvariable=spray_status_var).pack(side=tk.LEFT, padx=(12, 16))
     tk.Label(statusbar, textvariable=status, anchor="w").pack(side=tk.TOP, fill=tk.X)
     tk.Label(statusbar, textvariable=model_status, anchor="w").pack(side=tk.TOP, fill=tk.X)
 
-    display.DisplayShape(shape, color=BASE_COLOR, transparency=0.15, update=True)
+    try:
+        display.DisplayShape(shape, color=BASE_COLOR, transparency=0.15, update=False)
+        draw_reference_axes()
+        display.FitAll()
+        display.Repaint()
+    except Exception as exc:
+        report_ui_error(exc, "Initial display error")
     root.mainloop()
 
 
@@ -674,10 +750,13 @@ def _selected_learned_hotspots(predictions: list[HotspotPrediction]) -> list[Hot
 
 
 def _clear_display(display: Any) -> None:
-    display.EraseAll()
+    try:
+        display.EraseAll()
+    except Exception:
+        pass
     try:
         display.Context.RemoveAll(False)
-    except AttributeError:
+    except Exception:
         pass
 
 
@@ -711,6 +790,12 @@ def _parse_water_force(text: str) -> float | None:
         return float(text.strip().replace(",", "."))
     except ValueError:
         return None
+
+
+def _spray_direction_label(direction_key: str) -> str:
+    if direction_key == "all":
+        return "All Axis"
+    return direction_key
 
 
 def _sphere_at(point: tuple[float, float, float], radius: float):

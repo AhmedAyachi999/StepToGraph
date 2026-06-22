@@ -67,6 +67,9 @@ The simplified UI controls are:
 | `Predict Hotspots` | Runs the trained model and colors predicted hotspot faces in pink. |
 | `Run Cleaning Simulation` | Runs the cleaning simulation and colors faces where particles stayed. |
 | `Water Force` | Sets cleaning force from `0.000` to `1.000`; default is `0.500`. |
+| `Spray Direction` | Chooses all-axis spray or one side: `+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z`. |
+
+The 3D viewer shows a built-in axis triedron in the lower-right corner.
 
 ## Model
 
