@@ -69,11 +69,14 @@ def classify_step_edges(
         if len(faces) != 2:
             continue
 
-        edge_data = EdgeDataExtractor(edge, faces, num_samples=edge_sample_count)
         convexity, samples = "neutral", []
-        if edge_data.good:
-            convexity = CONVEXITY.get(edge_data.edge_convexity(1e-3), "neutral")
-            samples = edge_data.points.tolist()
+        try:
+            edge_data = EdgeDataExtractor(edge, faces, num_samples=edge_sample_count)
+            if edge_data.good:
+                convexity = CONVEXITY.get(edge_data.edge_convexity(1e-3), "neutral")
+                samples = edge_data.points.tolist()
+        except Exception:
+            convexity, samples = "neutral", []
 
         edges.append(
             ClassifiedEdge(
@@ -96,9 +99,12 @@ def edge_shape_groups(step_path: str | Path) -> dict[str, list]:
             continue
 
         edge_type = "neutral"
-        edge_data = EdgeDataExtractor(edge, faces)
-        if edge_data.good:
-            edge_type = CONVEXITY.get(edge_data.edge_convexity(1e-3), "neutral")
+        try:
+            edge_data = EdgeDataExtractor(edge, faces)
+            if edge_data.good:
+                edge_type = CONVEXITY.get(edge_data.edge_convexity(1e-3), "neutral")
+        except Exception:
+            edge_type = "neutral"
         groups[edge_type].append(edge.topods_shape())
     return groups
 
