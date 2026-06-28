@@ -1,0 +1,13 @@
+name: stepclean-occwl
+channels:
+  - conda-forge
+channel_priority: strict
+dependencies:
+  - python=3.11
+  - pythonocc-core=7.8.1.1
+  - pip
+  - pip:
+      - git+https://github.com/AutodeskAILab/occwl.git@v3.0.0
+      - lightgbm>=4.6
+      - pandas>=3.0
+      - scikit-learn>=1.9

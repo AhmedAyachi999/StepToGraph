@@ -68,6 +68,19 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install_dependencies.ps1
 ```
 
+If you only need the CAD/UI runtime, the shorter path is:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+```powershell
+.\setup_occwl_env.ps1
+```
+
+See `docs/OCCWL_ENV_SETUP.md` for the same commands split into copy-friendly
+blocks.
+
 The installer creates two local folders:
 
 - `occwl-env`: CAD/OpenCascade environment used to open STEP files and run the UI.
