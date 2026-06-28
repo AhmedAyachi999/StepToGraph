@@ -66,9 +66,15 @@ Open a sample directly:
 
 Do not run the UI with plain `python` or `.venv311`; those environments may not have `occwl`.
 
-## If `occwl` Is Missing
+## If Setup Reports `occwl` Is Missing
 
-Run:
+If setup prints a Python traceback such as:
+
+```text
+importlib.metadata.PackageNotFoundError: No package metadata was found for occwl
+```
+
+force reinstall the pinned `occwl` package:
 
 ```powershell
 .\setup_occwl_env.ps1 -ForceOccwlReinstall
