@@ -1,75 +1,31 @@
+"""Build the engineered per-face table used by classifier training."""
+
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMRanker
-from sklearn.model_selection import GroupKFold, GroupShuffleSplit
 
 
-DEFAULT_DATA_DIR = Path("cache") / "abc_cleaning_retention_2000_sample2mb_all_axis_wf05_rich"
+DEFAULT_DATA_DIR = Path("data") / "training" / "cleaning_retention_wf05"
 DEFAULT_FACE_CSV = DEFAULT_DATA_DIR / "face_particle_retention.csv"
 DEFAULT_NEIGHBOR_CSV = DEFAULT_DATA_DIR / "dirty_surface_neighbor_context.csv"
 DEFAULT_FORM_CSV = DEFAULT_DATA_DIR / "form_particle_retention.csv"
 DEFAULT_MODEL_OUTPUT = Path("cache") / "lightgbm_hotspot_model.txt"
-DEFAULT_PREDICTIONS_OUTPUT = Path("cache") / "hotspot_ranker_predictions_wf05_markers.csv"
-DEFAULT_HOLDOUT_PREDICTIONS_OUTPUT = Path("cache") / "hotspot_ranker_holdout_predictions_wf05_markers.csv"
-DEFAULT_IMPORTANCE_OUTPUT = Path("cache") / "hotspot_ranker_feature_importance_wf05_markers.csv"
 TARGET_COLUMN = "retained_particle_marker_count"
-RELEVANCE_COLUMN = "hotspot_relevance"
-SCORE_COLUMN = "predicted_hotspot_score"
 FEATURE_COLUMNS = [
-    "form_type",
-    "sample_count",
-    "form_retained_particle_ratio",
-    "form_retained_particle_share_total",
-    "form_face_count",
-    "form_dataset_count",
-    "form_retention_rank_overall",
-    "surface_area",
     "area_weighted_exposure",
-    "area_weighted_water_dose",
+    "sample_count",
     "area_weighted_cleaning_dose",
-    "area_weighted_hotspot_score",
-    "area_weighted_redeposition",
-    "area_weighted_poor_drainage",
-    "area_weighted_concavity",
-    "area_weighted_hiddenness",
-    "boundary_count",
-    "boundary_concave_count",
-    "boundary_sharp_nonconcave_count",
-    "boundary_smooth_count",
-    "boundary_mean_angle_score",
-    "boundary_max_angle_score",
-    "boundary_mean_concavity_score",
-    "boundary_max_concavity_score",
-    "exact_boundary_count",
-    "exact_boundary_convex_count",
-    "exact_boundary_concave_count",
-    "exact_boundary_neutral_count",
-    "neighbor_count",
-    "neighbor_surface_area_mean",
-    "neighbor_surface_area_max",
-    "neighbor_form_retained_particle_ratio_mean",
-    "neighbor_form_retained_particle_ratio_max",
-    "neighbor_form_retained_particle_share_total_mean",
-    "neighbor_form_retained_particle_share_total_max",
-    "neighbor_form_retention_rank_mean",
-    "neighbor_form_retention_rank_min",
-    "neighbor_area_weighted_concavity_mean",
-    "neighbor_area_weighted_concavity_max",
+    "area_weighted_water_dose",
     "neighbor_area_weighted_cleaning_dose_mean",
+    "area_weighted_poor_drainage",
+    "area_weighted_hiddenness",
+    "neighbor_area_weighted_hotspot_score_max",
     "neighbor_area_weighted_cleaning_dose_min",
     "neighbor_area_weighted_hotspot_score_mean",
-    "neighbor_area_weighted_hotspot_score_max",
-    "neighbor_boundary_concave_count",
-    "neighbor_boundary_convex_count",
-    "neighbor_boundary_neutral_count",
-    "neighbor_mesh_concave_count",
-    "neighbor_mesh_sharp_nonconcave_count",
 ]
 
 
@@ -226,83 +182,7 @@ class NeighborFeatureAggregate:
         }
 
 
-@dataclass(frozen=True)
-class SplitInfo:
-    name: str
-    train_rows: int
-    test_rows: int
-    train_datasets: int
-    test_datasets: int
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train a LightGBM LambdaRank hotspot model grouped by STEP object."
-    )
-    parser.add_argument("--face-csv", type=Path, default=DEFAULT_FACE_CSV)
-    parser.add_argument("--neighbor-csv", type=Path, default=DEFAULT_NEIGHBOR_CSV)
-    parser.add_argument("--form-csv", type=Path, default=DEFAULT_FORM_CSV)
-    parser.add_argument("--model-output", type=Path, default=DEFAULT_MODEL_OUTPUT)
-    parser.add_argument("--predictions-output", type=Path, default=DEFAULT_PREDICTIONS_OUTPUT)
-    parser.add_argument("--holdout-predictions-output", type=Path, default=DEFAULT_HOLDOUT_PREDICTIONS_OUTPUT)
-    parser.add_argument("--importance-output", type=Path, default=DEFAULT_IMPORTANCE_OUTPUT)
-    parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument(
-        "--holdout-test-size",
-        type=float,
-        default=0.0,
-        help="When > 0, evaluate once on this fraction of held-out STEP objects instead of cross-validation.",
-    )
-    parser.add_argument("--top-k", type=int, default=4)
-    parser.add_argument(
-        "--max-faces-per-object",
-        type=int,
-        default=2000,
-        help="Cap very large ranking groups after keeping all relevant faces and sampled lower-ranked faces.",
-    )
-    parser.add_argument("--random-state", type=int, default=42)
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    frame = build_training_frame(args.face_csv, args.neighbor_csv, args.form_csv, top_k=args.top_k)
-    frame = limit_faces_per_object(
-        frame,
-        max_faces_per_object=args.max_faces_per_object,
-        random_state=args.random_state,
-    )
-    prepared = prepare_frame(frame)
-    split_info: SplitInfo | None = None
-    if args.holdout_test_size > 0.0:
-        predictions, split_info = holdout_predict(
-            prepared,
-            test_size=args.holdout_test_size,
-            random_state=args.random_state,
-        )
-        predictions_output = args.holdout_predictions_output
-    else:
-        predictions = cross_val_predict(prepared, folds=args.folds, random_state=args.random_state)
-        predictions_output = args.predictions_output
-
-    final_frame = sort_for_ranking(prepared)
-    model = make_ranker(args.random_state)
-    model.fit(
-        final_frame[FEATURE_COLUMNS],
-        final_frame[RELEVANCE_COLUMN],
-        group=group_sizes(final_frame),
-    )
-    args.model_output.parent.mkdir(parents=True, exist_ok=True)
-    model.booster_.save_model(str(args.model_output))
-    write_predictions(predictions, predictions_output)
-    write_importance(model, args.importance_output)
-
-    metrics = evaluate(predictions, top_k=args.top_k)
-    print_summary(prepared, metrics, args, predictions_output, split_info)
-    return 0
-
-
-def build_training_frame(face_csv: Path, neighbor_csv: Path, form_csv: Path, *, top_k: int) -> pd.DataFrame:
+def build_training_frame(face_csv: Path, neighbor_csv: Path, form_csv: Path) -> pd.DataFrame:
     if not face_csv.exists():
         raise FileNotFoundError(f"Missing face CSV: {face_csv}")
     if not neighbor_csv.exists():
@@ -343,9 +223,8 @@ def build_training_frame(face_csv: Path, neighbor_csv: Path, form_csv: Path, *, 
 
     frame = pd.DataFrame(rows)
     if frame.empty:
-        raise ValueError("No ranking rows were built from the input CSV files.")
+        raise ValueError("No training rows were built from the input CSV files.")
     add_derived_features(frame)
-    frame[RELEVANCE_COLUMN] = relevance_labels(frame, top_k=top_k)
     return frame
 
 
@@ -487,32 +366,6 @@ def add_exact_boundary(
     )
 
 
-def relevance_labels(frame: pd.DataFrame, *, top_k: int) -> pd.Series:
-    labels = pd.Series(0, index=frame.index, dtype=int)
-    for _, group in frame.groupby("dataset", sort=False):
-        positive_group = group[group[TARGET_COLUMN] > 0]
-        if positive_group.empty:
-            continue
-        ranked = positive_group.sort_values(
-            [TARGET_COLUMN, "surface_area", "face_id"],
-            ascending=[False, False, True],
-        )
-        count = len(ranked)
-        top_10 = max(top_k + 1, int(np.ceil(count * 0.10)))
-        top_25 = max(top_10 + 1, int(np.ceil(count * 0.25)))
-        top_50 = max(top_25 + 1, int(np.ceil(count * 0.50)))
-        for position, index in enumerate(ranked.index, start=1):
-            if position <= min(top_k, count):
-                labels.loc[index] = 4
-            elif position <= min(top_10, count):
-                labels.loc[index] = 3
-            elif position <= min(top_25, count):
-                labels.loc[index] = 2
-            elif position <= min(top_50, count):
-                labels.loc[index] = 1
-    return labels
-
-
 def limit_faces_per_object(
     frame: pd.DataFrame,
     *,
@@ -528,16 +381,16 @@ def limit_faces_per_object(
             continue
 
         ranked = group.sort_values(
-            [RELEVANCE_COLUMN, TARGET_COLUMN, "surface_area", "face_id"],
-            ascending=[False, False, False, True],
+            [TARGET_COLUMN, "surface_area", "face_id"],
+            ascending=[False, False, True],
         )
-        must_keep = ranked[ranked[RELEVANCE_COLUMN] >= 3]
+        must_keep = ranked[ranked[TARGET_COLUMN] > 0]
         remaining_slots = max(0, max_faces_per_object - len(must_keep))
-        lower_ranked = ranked[ranked[RELEVANCE_COLUMN] <= 0]
-        if remaining_slots >= len(lower_ranked):
+        clean_faces = ranked[ranked[TARGET_COLUMN] <= 0]
+        if remaining_slots >= len(clean_faces):
             kept = ranked
         else:
-            sampled = lower_ranked.sample(
+            sampled = clean_faces.sample(
                 n=remaining_slots,
                 random_state=random_state,
             )
@@ -555,197 +408,7 @@ def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
             continue
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce").fillna(0.0)
     prepared[TARGET_COLUMN] = pd.to_numeric(prepared[TARGET_COLUMN], errors="coerce").fillna(0.0)
-    prepared[RELEVANCE_COLUMN] = pd.to_numeric(prepared[RELEVANCE_COLUMN], errors="coerce").fillna(0).astype(int)
     return prepared
-
-
-def cross_val_predict(frame: pd.DataFrame, *, folds: int, random_state: int) -> pd.DataFrame:
-    dataset_groups = frame["dataset"].astype(str)
-    split_count = min(max(2, folds), dataset_groups.nunique())
-    predictions = frame[["dataset", "face_id", "form_type", TARGET_COLUMN, RELEVANCE_COLUMN]].copy()
-    predictions[SCORE_COLUMN] = np.nan
-    predictions["fold"] = -1
-
-    splitter = GroupKFold(n_splits=split_count)
-    for fold, (train_index, test_index) in enumerate(
-        splitter.split(frame[FEATURE_COLUMNS], frame[RELEVANCE_COLUMN], dataset_groups),
-        start=1,
-    ):
-        train_frame = sort_for_ranking(frame.iloc[train_index])
-        test_frame = frame.iloc[test_index]
-        model = make_ranker(random_state + fold)
-        model.fit(
-            train_frame[FEATURE_COLUMNS],
-            train_frame[RELEVANCE_COLUMN],
-            group=group_sizes(train_frame),
-        )
-        predictions.loc[test_frame.index, SCORE_COLUMN] = model.predict(test_frame[FEATURE_COLUMNS])
-        predictions.loc[test_frame.index, "fold"] = fold
-    return predictions
-
-
-def holdout_predict(
-    frame: pd.DataFrame,
-    *,
-    test_size: float,
-    random_state: int,
-) -> tuple[pd.DataFrame, SplitInfo]:
-    if not 0.0 < test_size < 1.0:
-        raise ValueError("--holdout-test-size must be greater than 0 and less than 1.")
-    dataset_groups = frame["dataset"].astype(str)
-    if dataset_groups.nunique() < 2:
-        raise ValueError("Holdout evaluation needs at least two STEP objects.")
-
-    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-    train_index, test_index = next(
-        splitter.split(frame[FEATURE_COLUMNS], frame[RELEVANCE_COLUMN], dataset_groups)
-    )
-    train_frame = sort_for_ranking(frame.iloc[train_index])
-    test_frame = frame.iloc[test_index].copy()
-
-    model = make_ranker(random_state)
-    model.fit(
-        train_frame[FEATURE_COLUMNS],
-        train_frame[RELEVANCE_COLUMN],
-        group=group_sizes(train_frame),
-    )
-
-    predictions = test_frame[["dataset", "face_id", "form_type", TARGET_COLUMN, RELEVANCE_COLUMN]].copy()
-    predictions[SCORE_COLUMN] = model.predict(test_frame[FEATURE_COLUMNS])
-    predictions["split"] = "test"
-    split_info = SplitInfo(
-        name="grouped holdout",
-        train_rows=len(train_frame),
-        test_rows=len(test_frame),
-        train_datasets=train_frame["dataset"].nunique(),
-        test_datasets=test_frame["dataset"].nunique(),
-    )
-    return predictions, split_info
-
-
-def sort_for_ranking(frame: pd.DataFrame) -> pd.DataFrame:
-    return frame.sort_values(["dataset", "face_id"]).copy()
-
-
-def group_sizes(frame: pd.DataFrame) -> list[int]:
-    return frame.groupby("dataset", sort=False).size().astype(int).tolist()
-
-
-def make_ranker(random_state: int) -> LGBMRanker:
-    return LGBMRanker(
-        objective="lambdarank",
-        metric="ndcg",
-        n_estimators=320,
-        learning_rate=0.035,
-        num_leaves=15,
-        min_child_samples=8,
-        subsample=0.9,
-        subsample_freq=1,
-        colsample_bytree=0.9,
-        reg_alpha=0.05,
-        reg_lambda=0.2,
-        random_state=random_state,
-        n_jobs=-1,
-        verbose=-1,
-    )
-
-
-def evaluate(predictions: pd.DataFrame, *, top_k: int) -> dict[str, float]:
-    hits = 0
-    possible_hits = 0
-    exact_matches = 0
-    evaluated_datasets = 0
-    precision_at_k: list[float] = []
-    ndcg_at_k: list[float] = []
-    for _, group in predictions.groupby("dataset", sort=False):
-        positive_group = group[group[TARGET_COLUMN] > 0]
-        if positive_group.empty:
-            continue
-        k = min(top_k, len(positive_group), len(group))
-        actual_index = set(positive_group.nlargest(k, TARGET_COLUMN).index)
-        predicted_index = set(group.nlargest(k, SCORE_COLUMN).index)
-        overlap = len(actual_index & predicted_index)
-        hits += overlap
-        possible_hits += len(actual_index)
-        evaluated_datasets += 1
-        if overlap == len(actual_index):
-            exact_matches += 1
-        precision_at_k.append(overlap / k)
-        ndcg_at_k.append(ndcg(group[RELEVANCE_COLUMN].to_numpy(), group[SCORE_COLUMN].to_numpy(), k))
-    return {
-        "mean_precision_at_k": float(np.mean(precision_at_k)) if precision_at_k else 0.0,
-        "mean_ndcg_at_k": float(np.mean(ndcg_at_k)) if ndcg_at_k else 0.0,
-        "exact_match_at_k": exact_matches / evaluated_datasets if evaluated_datasets else 0.0,
-        "evaluated_datasets": float(evaluated_datasets),
-        "hits": float(hits),
-        "possible_hits": float(possible_hits),
-    }
-
-
-def ndcg(relevance: np.ndarray, scores: np.ndarray, k: int) -> float:
-    predicted_order = np.argsort(scores)[::-1][:k]
-    ideal_order = np.argsort(relevance)[::-1][:k]
-    ideal = dcg(relevance[ideal_order])
-    if ideal <= 1e-12:
-        return 0.0
-    return dcg(relevance[predicted_order]) / ideal
-
-
-def dcg(relevance: np.ndarray) -> float:
-    gains = (2.0 ** relevance.astype(float)) - 1.0
-    discounts = np.log2(np.arange(len(relevance), dtype=float) + 2.0)
-    return float(np.sum(gains / discounts))
-
-
-def write_predictions(predictions: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    predictions.sort_values(
-        ["dataset", SCORE_COLUMN],
-        ascending=[True, False],
-    ).to_csv(path, index=False)
-
-
-def write_importance(model: LGBMRanker, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    importance = pd.DataFrame(
-        {
-            "feature": model.booster_.feature_name(),
-            "gain_importance": model.booster_.feature_importance(importance_type="gain"),
-            "split_importance": model.booster_.feature_importance(importance_type="split"),
-        }
-    ).sort_values(["gain_importance", "split_importance"], ascending=False)
-    importance.to_csv(path, index=False)
-
-
-def print_summary(
-    frame: pd.DataFrame,
-    metrics: dict[str, float],
-    args: argparse.Namespace,
-    predictions_output: Path,
-    split_info: SplitInfo | None,
-) -> None:
-    print("LightGBM LambdaRank hotspot model")
-    print(f"Rows: {len(frame)}")
-    print(f"Datasets: {frame['dataset'].nunique()}")
-    print(f"Target: {TARGET_COLUMN}")
-    print(f"Features: {', '.join(FEATURE_COLUMNS)}")
-    print()
-    if split_info is None:
-        print(f"Evaluation: grouped {args.folds}-fold cross-validation")
-    else:
-        print(f"Evaluation: {split_info.name}")
-        print(f"  Train: {split_info.train_datasets} STEP objects, {split_info.train_rows} rows")
-        print(f"  Test:  {split_info.test_datasets} STEP objects, {split_info.test_rows} rows")
-    print(f"Top-{args.top_k} ranking")
-    print(f"  Mean top-{args.top_k} face accuracy: {metrics['mean_precision_at_k']:.4f}")
-    print(f"  Exact object top-{args.top_k} match: {metrics['exact_match_at_k']:.4f}")
-    print(f"  Mean NDCG@{args.top_k}:             {metrics['mean_ndcg_at_k']:.4f}")
-    print(f"  Evaluated objects: {int(metrics['evaluated_datasets'])}")
-    print(f"  Hits: {int(metrics['hits'])}/{int(metrics['possible_hits'])}")
-    print()
-    print(f"Wrote model: {args.model_output.resolve()}")
-    print(f"Wrote predictions: {predictions_output.resolve()}")
-    print(f"Wrote feature importance: {args.importance_output.resolve()}")
 
 
 def empty_form_prior() -> dict[str, float]:
@@ -807,7 +470,3 @@ def empty_neighbor_features() -> dict[str, float | int]:
 
 def empty_context_features() -> dict[str, float | int]:
     return empty_boundary_features() | empty_exact_boundary_features() | empty_neighbor_features()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

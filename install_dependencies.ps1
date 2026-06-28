@@ -11,33 +11,9 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
 $RequirementsFile = Join-Path $ProjectRoot "requirements-ml.txt"
-$OccEnvPath = Join-Path $ProjectRoot "occwl-env"
-$OccPython = Join-Path $OccEnvPath "python.exe"
+$SetupOccwlScript = Join-Path $ProjectRoot "setup_occwl_env.ps1"
 $MlEnvPath = Join-Path $ProjectRoot ".venv311"
 $MlPython = Join-Path $MlEnvPath "Scripts\python.exe"
-$Micromamba = Join-Path $ProjectRoot "Library\bin\micromamba.exe"
-$OccwlPackage = "git+https://github.com/AutodeskAILab/occwl.git@v3.0.0"
-
-function Find-CondaEnvironmentManager {
-    if (Test-Path -LiteralPath $Micromamba) {
-        return $Micromamba
-    }
-
-    foreach ($CommandName in @("micromamba", "mamba", "conda")) {
-        $Command = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($Command) {
-            if ($Command.Path) {
-                return $Command.Path
-            }
-            if ($Command.Source) {
-                return $Command.Source
-            }
-            return $Command.Name
-        }
-    }
-
-    return $null
-}
 
 function Install-PipRequirements {
     param(
@@ -61,50 +37,18 @@ function Install-PipRequirements {
     }
 }
 
-function Install-OccwlPackage {
-    param(
-        [Parameter(Mandatory = $true)][string]$PythonExe
-    )
-
-    $EnvironmentRoot = Split-Path -Parent $PythonExe
-    $OccwlImportPath = Join-Path $EnvironmentRoot "Lib\site-packages\occwl"
-    if (Test-Path -LiteralPath $OccwlImportPath) {
-        return
-    }
-
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        throw "Git is required to install occwl from ${OccwlPackage}."
-    }
-
-    Write-Host "Installing occwl from ${OccwlPackage}..."
-    & $PythonExe -m pip install $OccwlPackage
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install occwl from ${OccwlPackage}."
-    }
-}
-
 if (-not (Test-Path -LiteralPath $RequirementsFile)) {
     throw "Missing requirements file: ${RequirementsFile}"
 }
 
 if (-not $SkipOccEnv) {
-    if (-not (Test-Path -LiteralPath $OccPython)) {
-        $EnvironmentManager = Find-CondaEnvironmentManager
-        if ($EnvironmentManager) {
-            Write-Host "Creating OpenCascade UI environment at ${OccEnvPath} with ${EnvironmentManager}..."
-            & $EnvironmentManager create -y -p $OccEnvPath -c conda-forge python=3.11 pythonocc-core=7.8.1.1 pip
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to create OpenCascade UI environment at ${OccEnvPath}."
-            }
-        }
-        else {
-            throw "OpenCascade environment not found. Download Micromamba into Library\bin or install micromamba, mamba, or conda, then rerun this script."
-        }
+    if (-not (Test-Path -LiteralPath $SetupOccwlScript)) {
+        throw "Missing setup script: ${SetupOccwlScript}"
     }
 
-    if (Test-Path -LiteralPath $OccPython) {
-        Install-OccwlPackage -PythonExe $OccPython
-        Install-PipRequirements -PythonExe $OccPython -EnvironmentName "OpenCascade UI environment"
+    & $SetupOccwlScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install OpenCascade UI environment."
     }
 }
 

@@ -7,6 +7,9 @@ micromamba.tar.bz2
 .idea/
 __pycache__/
 *.pyc
+cache/*
+!cache/.gitkeep
+!cache/lightgbm_hotspot_model.txt
 
 abc_datasets/
 visualization/output/

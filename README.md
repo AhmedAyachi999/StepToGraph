@@ -30,13 +30,13 @@ These instructions are for Windows PowerShell.
 
 Install these first:
 
-- Git
-- Python 3.11, available as `py -3.11`
+- Git, for cloning the repository and installing the pinned `occwl` source commit
 - Internet access for dependency downloads
+- Python 3.11 available as `py -3.11`, only if you also want the separate ML training environment
 
-The CAD packages come from `conda-forge`, so plain `pip install` is not enough
-for the CAD environment. The steps below download a project-local Micromamba
-executable so you do not need `conda` installed globally.
+Do not copy or commit `occwl-env`. It is a generated local runtime folder.
+OpenCascade must come from `conda-forge`; a plain `pip install` cannot install
+this CAD stack correctly.
 
 Clone the project:
 
@@ -45,55 +45,28 @@ git clone https://github.com/AhmedAyachi999/StepToGraph.git
 cd StepToGraph
 ```
 
-Check that the required commands are available:
-
-```powershell
-py -3.11 --version
-```
-
-Download Micromamba into the clone. This creates
-`Library\bin\micromamba.exe`, which is the local executable used by the
-installer:
-
-```powershell
-Invoke-WebRequest -Uri https://micro.mamba.pm/api/micromamba/win-64/latest -OutFile micromamba.tar.bz2
-tar xf micromamba.tar.bz2
-.\Library\bin\micromamba.exe --version
-```
-
-Create the local environments:
+Create or repair the CAD/UI environment:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\install_dependencies.ps1
-```
-
-If you only need the CAD/UI runtime, the shorter path is:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-```powershell
 .\setup_occwl_env.ps1
 ```
 
-See `docs/OCCWL_ENV_SETUP.md` for the same commands split into copy-friendly
-blocks.
+The script downloads project-local Micromamba if needed, creates or updates
+`occwl-env` from `environment-occwl.yml`, installs `occwl` 3.0.0 from a pinned GitHub commit without letting pip change the conda-managed CAD packages, and runs an
+import test. A successful run ends with:
 
-The installer creates two local folders:
-
-- `occwl-env`: CAD/OpenCascade environment used to open STEP files and run the UI.
-- `.venv311`: machine-learning environment used for training and diagnostics.
-
-Verify that both environments were created:
-
-```powershell
-Test-Path .\occwl-env\python.exe
-Test-Path .\.venv311\Scripts\python.exe
+```text
+occwl-env ready
 ```
 
-Both commands should print `True`.
+If an old `occwl-env` exists and still fails with an `OCC`, `occwl.compound`, or
+`compound_ext`-style import error, rebuild the generated folder:
+
+```powershell
+if (Test-Path .\occwl-env) { Remove-Item .\occwl-env -Recurse -Force }
+.\setup_occwl_env.ps1
+```
 
 Run the UI:
 
@@ -107,20 +80,29 @@ Open a sample STEP file directly:
 .\occwl-env\python.exe desktop_ui.py step_datasets\perfect_L_no_holes.step
 ```
 
-If `occwl-env` was not created, create it manually with the environment manager
-you installed. With the project-local Micromamba from above, run:
+To create both the CAD/UI environment and the separate ML training environment,
+run:
 
 ```powershell
-.\Library\bin\micromamba.exe create -y -p .\occwl-env -c conda-forge python=3.11 pythonocc-core=7.8.1.1 pip
-.\occwl-env\python.exe -m pip install git+https://github.com/AutodeskAILab/occwl.git@v3.0.0
-.\occwl-env\python.exe -m pip install -r requirements-ml.txt
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install_dependencies.ps1
 ```
 
-You can also use `conda`, `mamba`, or a globally installed `micromamba` for the
-same create command.
+The generated local folders are ignored by Git:
 
-The `occwl-env` and `.venv311` folders are generated locally and are ignored by
-Git. Do not push them to GitHub.
+- `occwl-env`: CAD/OpenCascade environment used to open STEP files and run the UI.
+- `.venv311`: machine-learning environment used for training and diagnostics.
+- `Library`: project-local Micromamba executable.
+
+Verify the environments:
+
+```powershell
+Test-Path .\occwl-env\python.exe
+Test-Path .\.venv311\Scripts\python.exe
+```
+
+See `docs/OCCWL_ENV_SETUP.md` for the same setup in smaller troubleshooting
+steps.
 
 ## Run The UI
 
@@ -195,7 +177,8 @@ cache\lightgbm_hotspot_model.txt
 - `stepclean/ml/training_data.py`: shared feature table builder used by training.
 - `data/training/cleaning_retention_wf05/`: current training CSVs.
 - `install_dependencies.ps1`: dependency installer.
-- `requirements-ml.txt`: ML Python packages.
+- `environment-occwl.yml`: conda-forge CAD/UI runtime packages.
+- `requirements-ml.txt`: bounded ML Python packages for `.venv311`.
 - `features/cleaning_simulation/`: cleaning simulation and surface sampling.
 - `features/edge_classification/`: convex/concave edge detection.
 - `features/hole_finding/`: surface-form and inward-cylinder detection.

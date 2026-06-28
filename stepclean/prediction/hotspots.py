@@ -1,3 +1,5 @@
+"""Predict stayed-dirty face probabilities for a new STEP file."""
+
 from __future__ import annotations
 
 import csv
@@ -18,8 +20,7 @@ from features.hole_finding import FaceFormFinder
 
 
 DEFAULT_HOTSPOT_MODEL_PATH = Path("cache") / "lightgbm_hotspot_model.txt"
-DEFAULT_FORM_PRIOR_CSV = Path("cache") / "abc_cleaning_retention_2000_sample2mb_all_axis_wf05_rich" / "form_particle_retention.csv"
-FALLBACK_FORM_PRIOR_CSV = Path("cache") / "cleaning_retention" / "form_particle_retention.csv"
+DEFAULT_FORM_PRIOR_CSV = Path("data") / "training" / "cleaning_retention_wf05" / "form_particle_retention.csv"
 TRAINED_WATER_FORCE = 0.5
 TRAINED_WATER_DIRECTIONS = (
     (-1.0, 0.0, 0.0),
@@ -30,34 +31,16 @@ TRAINED_WATER_DIRECTIONS = (
     (0.0, 0.0, 1.0),
 )
 MODEL_FEATURE_COLUMNS = [
-    "form_type",
-    "sample_count",
-    "surface_area",
     "area_weighted_exposure",
-    "area_weighted_water_dose",
+    "sample_count",
     "area_weighted_cleaning_dose",
-    "area_weighted_hotspot_score",
-    "area_weighted_redeposition",
+    "area_weighted_water_dose",
+    "neighbor_area_weighted_cleaning_dose_mean",
     "area_weighted_poor_drainage",
-    "area_weighted_concavity",
     "area_weighted_hiddenness",
-]
-SURFACE_FORM_BOUNDARY_FEATURE_COLUMNS = [
-    "form_type",
-    "form_retained_particle_ratio",
-    "form_retained_particle_share_total",
-    "form_face_count",
-    "form_dataset_count",
-    "form_retention_rank_overall",
-    "area_weighted_concavity",
-    "boundary_count",
-    "boundary_concave_count",
-    "boundary_sharp_nonconcave_count",
-    "boundary_smooth_count",
-    "boundary_mean_angle_score",
-    "boundary_max_angle_score",
-    "boundary_mean_concavity_score",
-    "boundary_max_concavity_score",
+    "neighbor_area_weighted_hotspot_score_max",
+    "neighbor_area_weighted_cleaning_dose_min",
+    "neighbor_area_weighted_hotspot_score_mean",
 ]
 
 
@@ -65,8 +48,12 @@ SURFACE_FORM_BOUNDARY_FEATURE_COLUMNS = [
 class HotspotPrediction:
     face_id: int
     form_type: str
-    predicted_retained_particle_ratio: float
+    dirty_probability: float
     rank: int
+
+    @property
+    def predicted_retained_particle_ratio(self) -> float:
+        return self.dirty_probability
 
 
 @dataclass
@@ -312,7 +299,7 @@ def predict_step_hotspots(
         HotspotPrediction(
             face_id=int(row["face_id"]),
             form_type=str(row["form_type"]),
-            predicted_retained_particle_ratio=float(prediction),
+            dirty_probability=float(prediction),
             rank=rank,
         )
         for rank, (row, prediction) in enumerate(ranked_rows, start=1)
@@ -514,11 +501,10 @@ def _mesh_boundary_label(angle_score: float, concavity_score: float) -> str:
 
 
 def _load_form_priors() -> dict[str, dict[str, float]]:
-    path = DEFAULT_FORM_PRIOR_CSV if DEFAULT_FORM_PRIOR_CSV.exists() else FALLBACK_FORM_PRIOR_CSV
-    if not path.exists():
+    if not DEFAULT_FORM_PRIOR_CSV.exists():
         return {}
     priors: dict[str, dict[str, float]] = {}
-    with path.open("r", encoding="utf-8", newline="") as stream:
+    with DEFAULT_FORM_PRIOR_CSV.open("r", encoding="utf-8", newline="") as stream:
         for row in csv.DictReader(stream):
             form_type = str(row.get("form_type", "unknown"))
             priors[form_type] = {
